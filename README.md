@@ -66,11 +66,13 @@ on a GitHub-hosted macOS runner, which:
    `ChromeXD-<version>.dmg` (the disk image is signed, notarized, and
    stapled in its own right),
 4. **creates the GitHub release** for that tag with an auto-generated
-   changelog, and attaches both artifacts to it.
+   changelog, and attaches both artifacts to it. The release it creates stays
+   a draft until both artifacts have uploaded, so a failed build never leaves
+   a published release with missing downloads.
 
 Creating a release through the GitHub UI works too (that also pushes the tag):
 the run finds the release already present and only attaches artifacts, leaving
-hand-written release notes untouched.
+hand-written release notes and its draft state untouched.
 
 Tags must follow `v<major>[.<minor>[.<patch>]]` — the workflow refuses
 anything else so a malformed version can never be embedded in a release. The

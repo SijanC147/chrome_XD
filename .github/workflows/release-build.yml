@@ -8,7 +8,9 @@ name: Release Build (macOS)
 #   - Pushing a `v*` tag is THE release path. The workflow builds, signs, and
 #     notarizes the app, packages it as both a .zip and a .dmg, creates the
 #     GitHub release for that tag with an auto-generated changelog (if it does
-#     not already exist), and attaches both artifacts to it.
+#     not already exist), and attaches both artifacts to it. A release created
+#     by the workflow stays a draft until both artifacts have uploaded, so a
+#     failed run never leaves a published release with missing downloads.
 #     Creating a release through the GitHub UI with a new tag also pushes the
 #     tag, so that flow works too: the run then finds the release already
 #     present and only attaches artifacts, leaving hand-written notes intact.
@@ -326,50 +328,24 @@ jobs:
             ${{ steps.version.outputs.base_name }}.dmg
           if-no-files-found: error
 
-      # Release creation and asset attachment are restricted to tag pushes.
-      # workflow_dispatch runs must never mutate releases, even when they
-      # target a tag ref, so a manual (possibly ad-hoc signed) test build can
-      # never overwrite an official release asset.
-      - name: Ensure GitHub release exists
+      # Publishing is restricted to tag pushes. workflow_dispatch runs must
+      # never mutate releases, even when they target a tag ref, so a manual
+      # (possibly ad-hoc signed) test build can never overwrite an official
+      # release asset.
+      #
+      # The script creates its release as a draft and publishes it only after
+      # every asset has uploaded, so a failed or interrupted run cannot leave
+      # a visible release with missing downloads.
+      - name: Publish release with artifacts
         if: github.event_name == 'push' && steps.version.outputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_NAME: ${{ steps.version.outputs.base_name }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          API="https://api.github.com/repos/$GITHUB_REPOSITORY"
-
-          EXISTING_ID="$(curl -sS \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "$API/releases/tags/$TAG" | jq -r '.id // empty')"
-
-          if [ -n "$EXISTING_ID" ]; then
-            echo "Release for $TAG already exists (id $EXISTING_ID); leaving its title and notes untouched."
-            exit 0
-          fi
-
-          echo "Creating release $TAG with an auto-generated changelog..."
-          PAYLOAD="$(jq -n --arg tag "$TAG" --arg name "ChromeXD $VERSION" \
-            '{tag_name: $tag, name: $name, generate_release_notes: true, draft: false, prerelease: false}')"
-          RESPONSE="$(curl -sS -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "$API/releases" -d "$PAYLOAD")"
-
-          NEW_ID="$(printf '%s' "$RESPONSE" | jq -r '.id // empty')"
-          if [ -z "$NEW_ID" ]; then
-            echo "::error::Failed to create release for $TAG: $(printf '%s' "$RESPONSE" | jq -c '{message, errors}')"
-            exit 1
-          fi
-          echo "Created release $TAG (id $NEW_ID)."
-
-      - name: Attach artifacts to release
-        if: github.event_name == 'push' && steps.version.outputs.tag != ''
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          files: |
-            ${{ steps.version.outputs.base_name }}.zip
-            ${{ steps.version.outputs.base_name }}.dmg
-          fail_on_unmatched_files: true
+          .github/scripts/publish-release.sh \
+            --tag "$TAG" \
+            --version "$VERSION" \
+            --asset "$BASE_NAME.zip" \
+            --asset "$BASE_NAME.dmg"
