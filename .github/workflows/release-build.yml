@@ -4,6 +4,15 @@ name: Release Build (macOS)
 # is released. The app is built as a universal binary (arm64 + x86_64) with a
 # deployment target of macOS 13.0, so it runs on Ventura, Sonoma, and later.
 #
+# Triggering:
+#   - Publishing a GitHub release is THE release path: it builds and attaches
+#     ChromeXD-<version>.zip to that release. (A bare tag push deliberately
+#     does not trigger: publishing a release whose tag is new also pushes the
+#     tag, which would start two racing runs attaching the same asset.)
+#   - workflow_dispatch runs are test builds: they never touch releases, only
+#     upload a run artifact. Dispatching against a tag ref derives the version
+#     from the tag; force_adhoc=true skips signing/notarization entirely.
+#
 # Signing/notarization secrets (all optional — without them the build falls
 # back to ad-hoc signing and skips notarization, so CI still succeeds):
 #   MACOS_CERTIFICATE_P12      base64-encoded Developer ID Application .p12
@@ -16,9 +25,6 @@ name: Release Build (macOS)
 on:
   release:
     types: [published]
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       force_adhoc:
@@ -28,6 +34,13 @@ on:
 
 permissions:
   contents: write
+
+# Serialize runs that target the same tag/ref so a duplicate event can never
+# race an in-flight run over the same release asset. Queue rather than cancel:
+# an in-flight notarization should be allowed to finish.
+concurrency:
+  group: release-build-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build-macos:
@@ -48,6 +61,8 @@ jobs:
           if [ "$EVENT_NAME" = "release" ]; then
             TAG="$RELEASE_TAG"
           elif [ "$REF_TYPE" = "tag" ]; then
+            # workflow_dispatch against a tag ref: use the tag for version
+            # stamping only — dispatch runs never attach to releases.
             TAG="$REF_NAME"
           else
             TAG=""
@@ -297,7 +312,11 @@ jobs:
           if-no-files-found: error
 
       - name: Attach to GitHub release
-        if: steps.version.outputs.tag != ''
+        # Only genuine release events may touch release assets. This must
+        # exclude workflow_dispatch runs even when they target a tag ref —
+        # otherwise a manual test build (possibly ad-hoc signed via
+        # force_adhoc) could overwrite an official release asset.
+        if: github.event_name == 'release' && steps.version.outputs.tag != ''
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ steps.version.outputs.tag }}

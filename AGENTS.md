@@ -43,7 +43,9 @@ Agents decide when to trigger a review themselves, but must be
 Before a PR may be merged (and before declaring PR work complete):
 
 1. When the PR is review-ready per the policy above, post the `@greptileai`
-   trigger comment and wait for the review to complete.
+   trigger comment, then **stand by and monitor the PR**: poll for Greptile's
+   review to appear (its review comments/submission from `greptile-apps`),
+   rather than ending the session or moving on.
 2. Fetch all review comments left by the Greptile bot (`greptile-apps`).
 3. For each comment, assess validity. If valid, implement the fix; add
    clarifying code comments where the reviewer flagged unclear behavior.
@@ -53,9 +55,10 @@ Before a PR may be merged (and before declaring PR work complete):
    the commit SHA) or why no change was needed.
 6. Resolve each addressed review thread (GraphQL `resolveReviewThread` when a
    token is available; otherwise ask the user to resolve).
-7. Re-trigger `@greptileai` once for the batched fix round and confirm the
-   review check passes on the new head commit (PR `mergeable_state` should be
-   "clean").
+7. Re-trigger `@greptileai` once for the batched fix round, stand by and
+   monitor again, and repeat steps 2-7 until the review passes completely
+   with no new comments to address and the PR `mergeable_state` is "clean"
+   (subject to the budget guard above — ask the user before a 4th review).
 8. Never merge a PR without explicit permission from the user in the current
    session.
 

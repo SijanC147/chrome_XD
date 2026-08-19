@@ -50,9 +50,11 @@ xcodebuild -scheme ChromeXD -configuration Release build
 
 ## Releases (CI)
 
-Every published GitHub release (or pushed `v*` tag) triggers the
+Every published GitHub release triggers the
 [Release Build workflow](.github/workflows/release-build.yml) on a
-GitHub-hosted macOS runner. It builds a **universal binary**
+GitHub-hosted macOS runner. (Bare tag pushes intentionally do not trigger
+builds — publishing a release with a new tag would otherwise start two
+racing runs. Release tags must follow `v<major>[.<minor>[.<patch>]]`.) It builds a **universal binary**
 (Apple Silicon + Intel, macOS 13.0+), signs it with a Developer ID
 certificate, notarizes it with Apple, staples the ticket, and attaches
 `ChromeXD-<version>.zip` to the release — so downloaded builds open
@@ -60,7 +62,9 @@ without Gatekeeper warnings.
 
 The app version is stamped from the tag (e.g. tag `v1.2.0` →
 `CFBundleShortVersionString 1.2.0`). The workflow can also be run manually
-(workflow_dispatch) to produce a test build artifact.
+(workflow_dispatch) to produce a test build artifact — manual runs never
+attach anything to releases, and the `force_adhoc` input skips
+signing/notarization for quick pipeline tests.
 
 Maintainers: signing/notarization requires these repository secrets —
 `MACOS_CERTIFICATE_P12` (base64 .p12), `MACOS_CERTIFICATE_PASSWORD`,
