@@ -20,6 +20,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      force_adhoc:
+        description: "Force ad-hoc signing (skip Developer ID signing and notarization)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -77,7 +82,18 @@ jobs:
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          FORCE_ADHOC: ${{ inputs.force_adhoc }}
         run: |
+          if [ "$FORCE_ADHOC" = "true" ]; then
+            echo "::notice::force_adhoc input set — using ad-hoc signing (no notarization) for this test build."
+            {
+              echo "signed=false"
+              echo "identity=-"
+              echo "team_id="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # The signing secrets form a group: all three must be present to
           # sign, and none may be present to use the documented ad-hoc
           # fallback. A partial configuration is a misconfiguration — fail
