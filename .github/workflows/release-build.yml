@@ -30,7 +30,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (Node 24)
 
       - name: Derive version from tag
         id: version
@@ -124,10 +124,28 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
           rm -f "$CERT_PATH"
 
+          # Import Apple's intermediate CA certificates. Without them the
+          # imported identity may fail chain validation and be hidden by
+          # 'find-identity -v' even though the certificate itself is fine.
+          for CA in AppleWWDRCAG3 DeveloperIDG2CA; do
+            curl -fsS -o "$RUNNER_TEMP/$CA.cer" \
+              "https://www.apple.com/certificateauthority/$CA.cer" \
+              && security import "$RUNNER_TEMP/$CA.cer" -k "$KEYCHAIN_PATH" \
+                -T /usr/bin/codesign > /dev/null \
+              || echo "::warning::Could not install Apple intermediate CA $CA (continuing)."
+            rm -f "$RUNNER_TEMP/$CA.cer"
+          done
+
           IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
             | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
           if [ -z "$IDENTITY" ]; then
-            echo "::error::No 'Developer ID Application' identity found in the imported certificate."
+            # Surface what the keychain actually contains so the failure is
+            # diagnosable straight from the error annotation.
+            CERT_LABELS="$(security find-certificate -a "$KEYCHAIN_PATH" \
+              | awk -F'"' '/"labl"/ {print $4}' | sort -u | paste -sd ';' -)"
+            ALL_IDENTITIES="$(security find-identity -p codesigning "$KEYCHAIN_PATH" \
+              | sed -n 's/^ *[0-9][0-9]*) //p' | paste -sd ';' -)"
+            echo "::error::No valid 'Developer ID Application' identity found. Certificates in keychain: [${CERT_LABELS:-none}]. Codesigning identities (incl. invalid): [${ALL_IDENTITIES:-none}]. If a 'Developer ID Application' entry appears with an error, the certificate chain is incomplete; if only 'Apple Development'/'Apple Distribution' appear, export the Developer ID Application certificate instead; if the list is empty, the .p12 was likely exported without its private key (export from 'My Certificates' in Keychain Access)."
             exit 1
           fi
 
