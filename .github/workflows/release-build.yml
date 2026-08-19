@@ -30,7 +30,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Derive version from tag
         id: version
@@ -50,6 +50,13 @@ jobs:
 
           if [ -n "$TAG" ]; then
             VERSION="${TAG#v}"
+            # CFBundleShortVersionString must be 1-3 period-separated integers
+            # (e.g. 1.2 or 1.2.3). Reject tags like 'vnext' or 'v1.0-beta' so
+            # we never embed a malformed version in a published artifact.
+            if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+              echo "::error::Tag '$TAG' does not yield a valid release version ('$VERSION'). Use tags of the form v<major>[.<minor>[.<patch>]], e.g. v1.2.3."
+              exit 1
+            fi
             ZIP_NAME="ChromeXD-$VERSION"
           else
             # Manual (workflow_dispatch) test build from a branch.
@@ -71,14 +78,34 @@ jobs:
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -z "$MACOS_CERTIFICATE_P12" ]; then
-            echo "::warning::MACOS_CERTIFICATE_P12 not configured — falling back to ad-hoc signing (no notarization)."
+          # The signing secrets form a group: all three must be present to
+          # sign, and none may be present to use the documented ad-hoc
+          # fallback. A partial configuration is a misconfiguration — fail
+          # fast with a clear message instead of dying cryptically inside
+          # 'security import' or 'xcodebuild'.
+          MISSING=""
+          CONFIGURED=""
+          for VAR in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!VAR}" ]; then
+              MISSING="$MISSING $VAR"
+            else
+              CONFIGURED="$CONFIGURED $VAR"
+            fi
+          done
+
+          if [ -z "$CONFIGURED" ]; then
+            echo "::warning::No signing secrets configured — falling back to ad-hoc signing (no notarization)."
             {
               echo "signed=false"
               echo "identity=-"
               echo "team_id="
             } >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::Incomplete signing configuration. Configured:$CONFIGURED — missing:$MISSING. Set all of MACOS_CERTIFICATE_P12, MACOS_CERTIFICATE_PASSWORD, and APPLE_TEAM_ID (or none, for the ad-hoc fallback)."
+            exit 1
           fi
 
           KEYCHAIN_PATH="$RUNNER_TEMP/chromexd-signing.keychain-db"
@@ -165,9 +192,27 @@ jobs:
           NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
           NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
         run: |
-          if [ -z "$NOTARY_API_KEY_P8" ]; then
+          # Like the signing secrets, the notarization secrets form a group:
+          # all three or none. Fail fast on partial configuration instead of
+          # letting notarytool error out on empty credentials.
+          MISSING=""
+          CONFIGURED=""
+          for VAR in NOTARY_API_KEY_P8 NOTARY_API_KEY_ID NOTARY_API_ISSUER_ID; do
+            if [ -z "${!VAR}" ]; then
+              MISSING="$MISSING $VAR"
+            else
+              CONFIGURED="$CONFIGURED $VAR"
+            fi
+          done
+
+          if [ -z "$CONFIGURED" ]; then
             echo "::warning::Notarization secrets not configured — the app is signed but NOT notarized."
             exit 0
+          fi
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::Incomplete notarization configuration. Configured:$CONFIGURED — missing:$MISSING. Set all of NOTARY_API_KEY_P8, NOTARY_API_KEY_ID, and NOTARY_API_ISSUER_ID (or none, to skip notarization)."
+            exit 1
           fi
 
           APP="build/Build/Products/Release/ChromeXD.app"
@@ -210,7 +255,7 @@ jobs:
         run: security delete-keychain "$RUNNER_TEMP/chromexd-signing.keychain-db" || true
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.version.outputs.zip_name }}
           path: ${{ steps.version.outputs.zip_name }}.zip
@@ -218,7 +263,7 @@ jobs:
 
       - name: Attach to GitHub release
         if: steps.version.outputs.tag != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           files: ${{ steps.version.outputs.zip_name }}.zip
