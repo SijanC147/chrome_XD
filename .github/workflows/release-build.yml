@@ -4,6 +4,15 @@ name: Release Build (macOS)
 # is released. The app is built as a universal binary (arm64 + x86_64) with a
 # deployment target of macOS 13.0, so it runs on Ventura, Sonoma, and later.
 #
+# Triggering:
+#   - Publishing a GitHub release is THE release path: it builds and attaches
+#     ChromeXD-<version>.zip to that release. (A bare tag push deliberately
+#     does not trigger: publishing a release whose tag is new also pushes the
+#     tag, which would start two racing runs attaching the same asset.)
+#   - workflow_dispatch runs are test builds: they never touch releases, only
+#     upload a run artifact. Dispatching against a tag ref derives the version
+#     from the tag; force_adhoc=true skips signing/notarization entirely.
+#
 # Signing/notarization secrets (all optional — without them the build falls
 # back to ad-hoc signing and skips notarization, so CI still succeeds):
 #   MACOS_CERTIFICATE_P12      base64-encoded Developer ID Application .p12
@@ -16,13 +25,22 @@ name: Release Build (macOS)
 on:
   release:
     types: [published]
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      force_adhoc:
+        description: "Force ad-hoc signing (skip Developer ID signing and notarization)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+# Serialize runs that target the same tag/ref so a duplicate event can never
+# race an in-flight run over the same release asset. Queue rather than cancel:
+# an in-flight notarization should be allowed to finish.
+concurrency:
+  group: release-build-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build-macos:
@@ -30,7 +48,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (Node 24)
 
       - name: Derive version from tag
         id: version
@@ -43,6 +61,8 @@ jobs:
           if [ "$EVENT_NAME" = "release" ]; then
             TAG="$RELEASE_TAG"
           elif [ "$REF_TYPE" = "tag" ]; then
+            # workflow_dispatch against a tag ref: use the tag for version
+            # stamping only — dispatch runs never attach to releases.
             TAG="$REF_NAME"
           else
             TAG=""
@@ -77,7 +97,18 @@ jobs:
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          FORCE_ADHOC: ${{ inputs.force_adhoc }}
         run: |
+          if [ "$FORCE_ADHOC" = "true" ]; then
+            echo "::notice::force_adhoc input set — using ad-hoc signing (no notarization) for this test build."
+            {
+              echo "signed=false"
+              echo "identity=-"
+              echo "team_id="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # The signing secrets form a group: all three must be present to
           # sign, and none may be present to use the documented ad-hoc
           # fallback. A partial configuration is a misconfiguration — fail
@@ -124,10 +155,28 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
           rm -f "$CERT_PATH"
 
+          # Import Apple's intermediate CA certificates. Without them the
+          # imported identity may fail chain validation and be hidden by
+          # 'find-identity -v' even though the certificate itself is fine.
+          for CA in AppleWWDRCAG3 DeveloperIDG2CA; do
+            curl -fsS -o "$RUNNER_TEMP/$CA.cer" \
+              "https://www.apple.com/certificateauthority/$CA.cer" \
+              && security import "$RUNNER_TEMP/$CA.cer" -k "$KEYCHAIN_PATH" \
+                -T /usr/bin/codesign > /dev/null \
+              || echo "::warning::Could not install Apple intermediate CA $CA (continuing)."
+            rm -f "$RUNNER_TEMP/$CA.cer"
+          done
+
           IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
             | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
           if [ -z "$IDENTITY" ]; then
-            echo "::error::No 'Developer ID Application' identity found in the imported certificate."
+            # Surface what the keychain actually contains so the failure is
+            # diagnosable straight from the error annotation.
+            CERT_LABELS="$(security find-certificate -a "$KEYCHAIN_PATH" \
+              | awk -F'"' '/"labl"/ {print $4}' | sort -u | paste -sd ';' -)"
+            ALL_IDENTITIES="$(security find-identity -p codesigning "$KEYCHAIN_PATH" \
+              | sed -n 's/^ *[0-9][0-9]*) //p' | paste -sd ';' -)"
+            echo "::error::No valid 'Developer ID Application' identity found. Certificates in keychain: [${CERT_LABELS:-none}]. Codesigning identities (incl. invalid): [${ALL_IDENTITIES:-none}]. If a 'Developer ID Application' entry appears with an error, the certificate chain is incomplete; if only 'Apple Development'/'Apple Distribution' appear, export the Developer ID Application certificate instead; if the list is empty, the .p12 was likely exported without its private key (export from 'My Certificates' in Keychain Access)."
             exit 1
           fi
 
@@ -161,6 +210,7 @@ jobs:
             CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             OTHER_CODE_SIGN_FLAGS="$SIGN_FLAGS" \
+            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
             build
 
       - name: Verify build
@@ -262,7 +312,11 @@ jobs:
           if-no-files-found: error
 
       - name: Attach to GitHub release
-        if: steps.version.outputs.tag != ''
+        # Only genuine release events may touch release assets. This must
+        # exclude workflow_dispatch runs even when they target a tag ref —
+        # otherwise a manual test build (possibly ad-hoc signed via
+        # force_adhoc) could overwrite an official release asset.
+        if: github.event_name == 'release' && steps.version.outputs.tag != ''
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
