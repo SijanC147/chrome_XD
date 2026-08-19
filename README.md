@@ -48,6 +48,27 @@ cd ChromeXD
 xcodebuild -scheme ChromeXD -configuration Release build
 ```
 
+## Releases (CI)
+
+Every published GitHub release (or pushed `v*` tag) triggers the
+[Release Build workflow](.github/workflows/release-build.yml) on a
+GitHub-hosted macOS runner. It builds a **universal binary**
+(Apple Silicon + Intel, macOS 13.0+), signs it with a Developer ID
+certificate, notarizes it with Apple, staples the ticket, and attaches
+`ChromeXD-<version>.zip` to the release — so downloaded builds open
+without Gatekeeper warnings.
+
+The app version is stamped from the tag (e.g. tag `v1.2.0` →
+`CFBundleShortVersionString 1.2.0`). The workflow can also be run manually
+(workflow_dispatch) to produce a test build artifact.
+
+Maintainers: signing/notarization requires these repository secrets —
+`MACOS_CERTIFICATE_P12` (base64 .p12), `MACOS_CERTIFICATE_PASSWORD`,
+`APPLE_TEAM_ID`, `NOTARY_API_KEY_P8`, `NOTARY_API_KEY_ID`,
+`NOTARY_API_ISSUER_ID`. If they're absent the workflow still succeeds with an
+ad-hoc–signed, non-notarized build (first launch then needs
+right-click → Open).
+
 ## Installation
 
 1. Copy `ChromeXD.app` to `/Applications/`
