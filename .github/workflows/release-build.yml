@@ -1,17 +1,26 @@
 name: Release Build (macOS)
 
-# Builds, signs, notarizes, and publishes ChromeXD.app whenever a new version
-# is released. The app is built as a universal binary (arm64 + x86_64) with a
-# deployment target of macOS 13.0, so it runs on Ventura, Sonoma, and later.
+# Builds, signs, notarizes, and publishes ChromeXD.app. The app is built as a
+# universal binary (arm64 + x86_64) with a deployment target of macOS 13.0, so
+# it runs on Ventura, Sonoma, and later.
 #
 # Triggering:
-#   - Publishing a GitHub release is THE release path: it builds and attaches
-#     ChromeXD-<version>.zip to that release. (A bare tag push deliberately
-#     does not trigger: publishing a release whose tag is new also pushes the
-#     tag, which would start two racing runs attaching the same asset.)
-#   - workflow_dispatch runs are test builds: they never touch releases, only
-#     upload a run artifact. Dispatching against a tag ref derives the version
-#     from the tag; force_adhoc=true skips signing/notarization entirely.
+#   - Pushing a `v*` tag is THE release path. The workflow builds, signs, and
+#     notarizes the app, packages it as both a .zip and a .dmg, creates the
+#     GitHub release for that tag with an auto-generated changelog (if it does
+#     not already exist), and attaches both artifacts to it. A release created
+#     by the workflow stays a draft until both artifacts have uploaded, so a
+#     failed run never leaves a published release with missing downloads.
+#     Creating a release through the GitHub UI with a new tag also pushes the
+#     tag, so that flow works too: the run then finds the release already
+#     present and only attaches artifacts, leaving hand-written notes intact.
+#     A tag push is the *only* release trigger on purpose — reacting to both
+#     `push: tags` and `release: published` would start two racing runs over
+#     the same release asset with different bundle versions.
+#   - workflow_dispatch runs are test builds. They never create or modify
+#     releases; they only upload run artifacts. Dispatching against a tag ref
+#     derives the version from the tag, and force_adhoc=true skips Developer
+#     ID signing and notarization entirely.
 #
 # Signing/notarization secrets (all optional — without them the build falls
 # back to ad-hoc signing and skips notarization, so CI still succeeds):
@@ -23,8 +32,9 @@ name: Release Build (macOS)
 #   NOTARY_API_ISSUER_ID       App Store Connect API Issuer ID (UUID)
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       force_adhoc:
@@ -39,7 +49,7 @@ permissions:
 # race an in-flight run over the same release asset. Queue rather than cancel:
 # an in-flight notarization should be allowed to finish.
 concurrency:
-  group: release-build-${{ github.event.release.tag_name || github.ref_name }}
+  group: release-build-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -49,20 +59,17 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1 (Node 24)
+        with:
+          # Full history so the release changelog can reference earlier tags.
+          fetch-depth: 0
 
       - name: Derive version from tag
         id: version
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "$EVENT_NAME" = "release" ]; then
-            TAG="$RELEASE_TAG"
-          elif [ "$REF_TYPE" = "tag" ]; then
-            # workflow_dispatch against a tag ref: use the tag for version
-            # stamping only — dispatch runs never attach to releases.
+          if [ "$REF_TYPE" = "tag" ]; then
             TAG="$REF_NAME"
           else
             TAG=""
@@ -77,19 +84,19 @@ jobs:
               echo "::error::Tag '$TAG' does not yield a valid release version ('$VERSION'). Use tags of the form v<major>[.<minor>[.<patch>]], e.g. v1.2.3."
               exit 1
             fi
-            ZIP_NAME="ChromeXD-$VERSION"
+            BASE_NAME="ChromeXD-$VERSION"
           else
             # Manual (workflow_dispatch) test build from a branch.
             VERSION="0.0.0"
-            ZIP_NAME="ChromeXD-$VERSION-$(git rev-parse --short HEAD)"
+            BASE_NAME="ChromeXD-$VERSION-$(git rev-parse --short HEAD)"
           fi
 
           {
             echo "tag=$TAG"
             echo "version=$VERSION"
-            echo "zip_name=$ZIP_NAME"
+            echo "base_name=$BASE_NAME"
           } >> "$GITHUB_OUTPUT"
-          echo "Building version $VERSION (tag: '${TAG:-none}', zip: $ZIP_NAME.zip)"
+          echo "Building version $VERSION (tag: '${TAG:-none}', artifacts: $BASE_NAME.zip / $BASE_NAME.dmg)"
 
       - name: Import Developer ID certificate
         id: signing
@@ -97,46 +104,74 @@ jobs:
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
           FORCE_ADHOC: ${{ inputs.force_adhoc }}
         run: |
+          adhoc() {
+            {
+              echo "signed=false"
+              echo "notarize=false"
+              echo "identity=-"
+              echo "team_id="
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          # Each credential set is all-or-nothing: complete means use it, empty
+          # means fall back to the documented unsigned path, and partial is a
+          # misconfiguration that must fail loudly rather than die cryptically
+          # inside 'security import' or notarytool.
+          #
+          # Sets <PREFIX>_MISSING and <PREFIX>_CONFIGURED. Written for bash 3.2
+          # (the macOS system bash), so no namerefs.
+          check_group() {
+            local prefix="$1"
+            shift
+            local missing="" configured="" var
+            for var in "$@"; do
+              if [ -z "${!var}" ]; then
+                missing="$missing $var"
+              else
+                configured="$configured $var"
+              fi
+            done
+            eval "${prefix}_MISSING=\$missing"
+            eval "${prefix}_CONFIGURED=\$configured"
+          }
+
           if [ "$FORCE_ADHOC" = "true" ]; then
             echo "::notice::force_adhoc input set — using ad-hoc signing (no notarization) for this test build."
-            {
-              echo "signed=false"
-              echo "identity=-"
-              echo "team_id="
-            } >> "$GITHUB_OUTPUT"
+            adhoc
             exit 0
           fi
 
-          # The signing secrets form a group: all three must be present to
-          # sign, and none may be present to use the documented ad-hoc
-          # fallback. A partial configuration is a misconfiguration — fail
-          # fast with a clear message instead of dying cryptically inside
-          # 'security import' or 'xcodebuild'.
-          MISSING=""
-          CONFIGURED=""
-          for VAR in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!VAR}" ]; then
-              MISSING="$MISSING $VAR"
-            else
-              CONFIGURED="$CONFIGURED $VAR"
-            fi
-          done
+          check_group SIGN \
+            MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_TEAM_ID
+          check_group NOTARY \
+            NOTARY_API_KEY_P8 NOTARY_API_KEY_ID NOTARY_API_ISSUER_ID
 
-          if [ -z "$CONFIGURED" ]; then
+          if [ -z "$SIGN_CONFIGURED" ]; then
             echo "::warning::No signing secrets configured — falling back to ad-hoc signing (no notarization)."
-            {
-              echo "signed=false"
-              echo "identity=-"
-              echo "team_id="
-            } >> "$GITHUB_OUTPUT"
+            adhoc
             exit 0
           fi
 
-          if [ -n "$MISSING" ]; then
-            echo "::error::Incomplete signing configuration. Configured:$CONFIGURED — missing:$MISSING. Set all of MACOS_CERTIFICATE_P12, MACOS_CERTIFICATE_PASSWORD, and APPLE_TEAM_ID (or none, for the ad-hoc fallback)."
+          if [ -n "$SIGN_MISSING" ]; then
+            echo "::error::Incomplete signing configuration. Configured:$SIGN_CONFIGURED — missing:$SIGN_MISSING. Set all of MACOS_CERTIFICATE_P12, MACOS_CERTIFICATE_PASSWORD, and APPLE_TEAM_ID (or none, for the ad-hoc fallback)."
             exit 1
+          fi
+
+          if [ -n "$NOTARY_CONFIGURED" ] && [ -n "$NOTARY_MISSING" ]; then
+            echo "::error::Incomplete notarization configuration. Configured:$NOTARY_CONFIGURED — missing:$NOTARY_MISSING. Set all of NOTARY_API_KEY_P8, NOTARY_API_KEY_ID, and NOTARY_API_ISSUER_ID (or none, to skip notarization)."
+            exit 1
+          fi
+
+          if [ -z "$NOTARY_CONFIGURED" ]; then
+            echo "::warning::Notarization secrets not configured — artifacts will be signed but NOT notarized."
+            NOTARIZE=false
+          else
+            NOTARIZE=true
           fi
 
           KEYCHAIN_PATH="$RUNNER_TEMP/chromexd-signing.keychain-db"
@@ -182,6 +217,7 @@ jobs:
 
           {
             echo "signed=true"
+            echo "notarize=$NOTARIZE"
             echo "identity=$IDENTITY"
             echo "team_id=$APPLE_TEAM_ID"
           } >> "$GITHUB_OUTPUT"
@@ -227,97 +263,89 @@ jobs:
           codesign --verify --strict --verbose=2 "$APP"
           codesign --display --verbose=2 "$APP"
 
-      - name: Package app
+      - name: Package app archive
         env:
-          ZIP_NAME: ${{ steps.version.outputs.zip_name }}
+          BASE_NAME: ${{ steps.version.outputs.base_name }}
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
-            "build/Build/Products/Release/ChromeXD.app" "$ZIP_NAME.zip"
+            "build/Build/Products/Release/ChromeXD.app" "$BASE_NAME.zip"
 
-      - name: Notarize and staple
-        if: steps.signing.outputs.signed == 'true'
+      - name: Notarize and staple app
+        if: steps.signing.outputs.notarize == 'true'
         env:
-          ZIP_NAME: ${{ steps.version.outputs.zip_name }}
+          BASE_NAME: ${{ steps.version.outputs.base_name }}
           NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
           NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
           NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
         run: |
-          # Like the signing secrets, the notarization secrets form a group:
-          # all three or none. Fail fast on partial configuration instead of
-          # letting notarytool error out on empty credentials.
-          MISSING=""
-          CONFIGURED=""
-          for VAR in NOTARY_API_KEY_P8 NOTARY_API_KEY_ID NOTARY_API_ISSUER_ID; do
-            if [ -z "${!VAR}" ]; then
-              MISSING="$MISSING $VAR"
-            else
-              CONFIGURED="$CONFIGURED $VAR"
-            fi
-          done
-
-          if [ -z "$CONFIGURED" ]; then
-            echo "::warning::Notarization secrets not configured — the app is signed but NOT notarized."
-            exit 0
-          fi
-
-          if [ -n "$MISSING" ]; then
-            echo "::error::Incomplete notarization configuration. Configured:$CONFIGURED — missing:$MISSING. Set all of NOTARY_API_KEY_P8, NOTARY_API_KEY_ID, and NOTARY_API_ISSUER_ID (or none, to skip notarization)."
-            exit 1
-          fi
-
           APP="build/Build/Products/Release/ChromeXD.app"
-          KEY_PATH="$RUNNER_TEMP/notary-key.p8"
-          printf '%s' "$NOTARY_API_KEY_P8" > "$KEY_PATH"
+          # The ticket attaches to the .app, so submit the zip but staple the
+          # bundle, then re-zip so the published archive carries the ticket.
+          .github/scripts/notarize.sh --submit "$BASE_NAME.zip" --staple "$APP"
+          rm -f "$BASE_NAME.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$BASE_NAME.zip"
 
-          echo "Submitting $ZIP_NAME.zip for notarization..."
-          SUBMIT_JSON="$(xcrun notarytool submit "$ZIP_NAME.zip" \
-            --key "$KEY_PATH" \
-            --key-id "$NOTARY_API_KEY_ID" \
-            --issuer "$NOTARY_API_ISSUER_ID" \
-            --wait --output-format json)"
-          echo "$SUBMIT_JSON"
-
-          STATUS="$(echo "$SUBMIT_JSON" | jq -r '.status')"
-          SUBMISSION_ID="$(echo "$SUBMIT_JSON" | jq -r '.id')"
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "::error::Notarization failed with status '$STATUS'. Fetching log..."
-            xcrun notarytool log "$SUBMISSION_ID" \
-              --key "$KEY_PATH" \
-              --key-id "$NOTARY_API_KEY_ID" \
-              --issuer "$NOTARY_API_ISSUER_ID" || true
-            rm -f "$KEY_PATH"
-            exit 1
-          fi
-          rm -f "$KEY_PATH"
-
-          echo "Stapling notarization ticket..."
-          xcrun stapler staple "$APP"
-
-          # Re-zip so the published archive contains the stapled app.
-          rm -f "$ZIP_NAME.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP_NAME.zip"
-
-          echo "--- Gatekeeper assessment ---"
+          echo "--- Gatekeeper assessment (app) ---"
           spctl -a -vv "$APP"
+
+      - name: Build disk image
+        env:
+          BASE_NAME: ${{ steps.version.outputs.base_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: |
+          # Packages the already-signed (and, for release builds, stapled) app.
+          .github/scripts/make-dmg.sh \
+            --app "build/Build/Products/Release/ChromeXD.app" \
+            --output "$BASE_NAME.dmg" \
+            --volname "ChromeXD $VERSION" \
+            --sign "$SIGN_IDENTITY"
+
+      - name: Notarize and staple disk image
+        if: steps.signing.outputs.notarize == 'true'
+        env:
+          BASE_NAME: ${{ steps.version.outputs.base_name }}
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          # A disk image is notarized and stapled in place.
+          .github/scripts/notarize.sh --submit "$BASE_NAME.dmg"
+
+          echo "--- Gatekeeper assessment (disk image) ---"
+          spctl -a -t open --context context:primary-signature -vv "$BASE_NAME.dmg"
 
       - name: Clean up signing keychain
         if: always() && steps.signing.outputs.signed == 'true'
         run: security delete-keychain "$RUNNER_TEMP/chromexd-signing.keychain-db" || true
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ steps.version.outputs.zip_name }}
-          path: ${{ steps.version.outputs.zip_name }}.zip
+          name: ${{ steps.version.outputs.base_name }}
+          path: |
+            ${{ steps.version.outputs.base_name }}.zip
+            ${{ steps.version.outputs.base_name }}.dmg
           if-no-files-found: error
 
-      - name: Attach to GitHub release
-        # Only genuine release events may touch release assets. This must
-        # exclude workflow_dispatch runs even when they target a tag ref —
-        # otherwise a manual test build (possibly ad-hoc signed via
-        # force_adhoc) could overwrite an official release asset.
-        if: github.event_name == 'release' && steps.version.outputs.tag != ''
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          files: ${{ steps.version.outputs.zip_name }}.zip
+      # Publishing is restricted to tag pushes. workflow_dispatch runs must
+      # never mutate releases, even when they target a tag ref, so a manual
+      # (possibly ad-hoc signed) test build can never overwrite an official
+      # release asset.
+      #
+      # The script creates its release as a draft and publishes it only after
+      # every asset has uploaded, so a failed or interrupted run cannot leave
+      # a visible release with missing downloads.
+      - name: Publish release with artifacts
+        if: github.event_name == 'push' && steps.version.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_NAME: ${{ steps.version.outputs.base_name }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          .github/scripts/publish-release.sh \
+            --tag "$TAG" \
+            --version "$VERSION" \
+            --asset "$BASE_NAME.zip" \
+            --asset "$BASE_NAME.dmg"

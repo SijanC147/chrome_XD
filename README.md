@@ -50,21 +50,42 @@ xcodebuild -scheme ChromeXD -configuration Release build
 
 ## Releases (CI)
 
-Every published GitHub release triggers the
-[Release Build workflow](.github/workflows/release-build.yml) on a
-GitHub-hosted macOS runner. (Bare tag pushes intentionally do not trigger
-builds — publishing a release with a new tag would otherwise start two
-racing runs. Release tags must follow `v<major>[.<minor>[.<patch>]]`.) It builds a **universal binary**
-(Apple Silicon + Intel, macOS 13.0+), signs it with a Developer ID
-certificate, notarizes it with Apple, staples the ticket, and attaches
-`ChromeXD-<version>.zip` to the release — so downloaded builds open
-without Gatekeeper warnings.
+Cutting a release is a single step: **push a `v*` tag**.
 
-The app version is stamped from the tag (e.g. tag `v1.2.0` →
-`CFBundleShortVersionString 1.2.0`). The workflow can also be run manually
-(workflow_dispatch) to produce a test build artifact — manual runs never
-attach anything to releases, and the `force_adhoc` input skips
-signing/notarization for quick pipeline tests.
+```bash
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+That triggers the [Release Build workflow](.github/workflows/release-build.yml)
+on a GitHub-hosted macOS runner, which:
+
+1. builds a **universal binary** (Apple Silicon + Intel, macOS 13.0+),
+2. signs it with a Developer ID certificate, notarizes it with Apple, and
+   staples the ticket — so downloads open without Gatekeeper warnings,
+3. packages both `ChromeXD-<version>.zip` and a drag-to-install
+   `ChromeXD-<version>.dmg` (the disk image is signed, notarized, and
+   stapled in its own right),
+4. **creates the GitHub release** for that tag with an auto-generated
+   changelog, and attaches both artifacts to it. The release it creates stays
+   a draft until both artifacts have uploaded, so a failed build never leaves
+   a published release with missing downloads.
+
+Creating a release through the GitHub UI works too (that also pushes the tag):
+the run finds the release already present and only attaches artifacts, leaving
+hand-written release notes and its draft state untouched.
+
+Tags must follow `v<major>[.<minor>[.<patch>]]` — the workflow refuses
+anything else so a malformed version can never be embedded in a release. The
+app version is stamped from the tag (tag `v1.2.0` →
+`CFBundleShortVersionString 1.2.0`).
+
+The workflow can also be run manually (workflow_dispatch) to produce test
+build artifacts. Manual runs never create or modify releases, and the
+`force_adhoc` input skips signing/notarization for quick pipeline tests.
+
+Helper scripts used by the workflow live in
+[`.github/scripts/`](.github/scripts) and can be run locally; both support
+`--dry-run` and `--help`.
 
 Maintainers: signing/notarization requires these repository secrets —
 `MACOS_CERTIFICATE_P12` (base64 .p12), `MACOS_CERTIFICATE_PASSWORD`,
@@ -75,10 +96,15 @@ right-click → Open).
 
 ## Installation
 
-1. Copy `ChromeXD.app` to `/Applications/`
+Download the latest `ChromeXD-<version>.dmg` (or `.zip`) from the
+[Releases page](https://github.com/SijanC147/chrome_XD/releases).
+
+1. Open the `.dmg` and drag **ChromeXD** to the `Applications` folder
+   (or copy `ChromeXD.app` to `/Applications/` if you downloaded the zip)
 
 2. Launch ChromeXD once:
-   - First launch may require: Right-click → Open → Open (due to Gatekeeper)
+   - Official notarized releases open normally. A locally built (unsigned)
+     app may require: Right-click → Open → Open (due to Gatekeeper)
    - Grant any requested permissions
 
 3. Set as default browser:
