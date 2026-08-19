@@ -77,10 +77,15 @@ Before a PR may be merged (and before declaring PR work complete):
   well would race two runs over the same asset).
 - Shipping a release is covered by the standing permission in the PR protocol
   above: after the work is merged, agents may cut the release themselves.
-  Choose the version by semver against the shipped changes (new user-facing
-  capability → minor; fixes only → patch), then **monitor the run to
-  completion and verify the published release** (both assets present,
-  notarization accepted, release published rather than left as a draft).
+  Choose the version by semver against the shipped changes (breaking change →
+  major; new user-facing capability → minor; fixes only → patch), then
+  **monitor the run to completion and verify the published release** (both
+  assets present, notarization accepted, release published rather than left
+  as a draft).
+- Release builds require the full signing/notarization secret set: on a tag
+  push the workflow fails before building rather than publishing artifacts
+  Gatekeeper would reject. The ad-hoc fallbacks apply to manual test builds
+  only.
 - Tags must be `v<major>[.<minor>[.<patch>]]` (e.g. `v1.2.3`); the workflow
   rejects malformed versions.
 - Workflow shell steps run under the macOS system bash (**3.2**) — no

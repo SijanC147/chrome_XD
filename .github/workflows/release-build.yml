@@ -22,8 +22,10 @@ name: Release Build (macOS)
 #     derives the version from the tag, and force_adhoc=true skips Developer
 #     ID signing and notarization entirely.
 #
-# Signing/notarization secrets (all optional — without them the build falls
-# back to ad-hoc signing and skips notarization, so CI still succeeds):
+# Signing/notarization secrets. Release builds (tag pushes) REQUIRE all six:
+# the job fails before building rather than publishing artifacts Gatekeeper
+# would reject. Manual test builds fall back to ad-hoc signing and skip
+# notarization when they are absent, so CI still succeeds:
 #   MACOS_CERTIFICATE_P12      base64-encoded Developer ID Application .p12
 #   MACOS_CERTIFICATE_PASSWORD password used when exporting the .p12
 #   APPLE_TEAM_ID              10-character Apple Developer Team ID
@@ -108,6 +110,8 @@ jobs:
           NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
           NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
           FORCE_ADHOC: ${{ inputs.force_adhoc }}
+          # A tag push publishes artifacts to users; a dispatch run does not.
+          IS_RELEASE: ${{ github.event_name == 'push' }}
         run: |
           adhoc() {
             {
@@ -116,6 +120,17 @@ jobs:
               echo "identity=-"
               echo "team_id="
             } >> "$GITHUB_OUTPUT"
+          }
+
+          # The unsigned/un-notarized fallbacks exist for manual test builds
+          # only. A release must never publish artifacts that Gatekeeper will
+          # reject, so on a tag push these conditions are fatal — and fatal
+          # here, before anything is built or published.
+          require_distributable() {
+            if [ "$IS_RELEASE" = "true" ]; then
+              echo "::error::$1 A release build must be Developer ID signed and notarized. Fix the repository secrets, then delete and re-push the tag to retry."
+              exit 1
+            fi
           }
 
           # Each credential set is all-or-nothing: complete means use it, empty
@@ -141,6 +156,7 @@ jobs:
           }
 
           if [ "$FORCE_ADHOC" = "true" ]; then
+            require_distributable "force_adhoc was requested."
             echo "::notice::force_adhoc input set — using ad-hoc signing (no notarization) for this test build."
             adhoc
             exit 0
@@ -152,6 +168,7 @@ jobs:
             NOTARY_API_KEY_P8 NOTARY_API_KEY_ID NOTARY_API_ISSUER_ID
 
           if [ -z "$SIGN_CONFIGURED" ]; then
+            require_distributable "No signing secrets are configured."
             echo "::warning::No signing secrets configured — falling back to ad-hoc signing (no notarization)."
             adhoc
             exit 0
@@ -168,6 +185,7 @@ jobs:
           fi
 
           if [ -z "$NOTARY_CONFIGURED" ]; then
+            require_distributable "Notarization secrets are not configured."
             echo "::warning::Notarization secrets not configured — artifacts will be signed but NOT notarized."
             NOTARIZE=false
           else
