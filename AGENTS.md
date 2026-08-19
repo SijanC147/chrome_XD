@@ -68,8 +68,17 @@ Before a PR may be merged (and before declaring PR work complete):
 
 ## Release / CI notes
 
+- **Pushing a `v*` tag is the release path**: the workflow builds, signs,
+  notarizes, packages `.zip` + `.dmg`, creates the GitHub release with an
+  auto-generated changelog, and attaches both artifacts. Tag push is
+  deliberately the only release trigger (reacting to `release: published` as
+  well would race two runs over the same asset).
 - Tags must be `v<major>[.<minor>[.<patch>]]` (e.g. `v1.2.3`); the workflow
   rejects malformed versions.
+- Workflow shell steps run under the macOS system bash (**3.2**) — no
+  namerefs (`local -n`), associative arrays, or other bash 4+ features.
+- Workflow helper scripts live in `.github/scripts/` and must keep supporting
+  `--dry-run` and `--help`.
 - Use the `force_adhoc=true` dispatch input to exercise the build pipeline
   without consuming signing/notarization (useful for CI debugging).
 - Signing/notarization requires the six repository secrets documented in
