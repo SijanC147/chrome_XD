@@ -59,8 +59,12 @@ Before a PR may be merged (and before declaring PR work complete):
    monitor again, and repeat steps 2-7 until the review passes completely
    with no new comments to address and the PR `mergeable_state` is "clean"
    (subject to the budget guard above — ask the user before a 4th review).
-8. Never merge a PR without explicit permission from the user in the current
-   session.
+8. **Merging**: once a PR has passed all checks and every review comment has
+   been addressed and resolved per the steps above, agents are cleared to
+   merge it without asking — unless the user has instructed otherwise for
+   that PR/task, or extenuating circumstances apply (e.g. risky/irreversible
+   changes, doubts about correctness, unresolved discussion with the user).
+   Use squash merge to match this repository's history style.
 
 ## Release / CI notes
 
