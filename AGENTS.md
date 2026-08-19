@@ -59,12 +59,14 @@ Before a PR may be merged (and before declaring PR work complete):
    monitor again, and repeat steps 2-7 until the review passes completely
    with no new comments to address and the PR `mergeable_state` is "clean"
    (subject to the budget guard above — ask the user before a 4th review).
-8. **Merging**: once a PR has passed all checks and every review comment has
-   been addressed and resolved per the steps above, agents are cleared to
-   merge it without asking — unless the user has instructed otherwise for
-   that PR/task, or extenuating circumstances apply (e.g. risky/irreversible
-   changes, doubts about correctness, unresolved discussion with the user).
-   Use squash merge to match this repository's history style.
+8. **Merging and shipping**: once a PR has passed all checks and every review
+   comment has been addressed and resolved per the steps above, agents are
+   cleared to merge it without asking — and likewise cleared to **ship a
+   release** for merged work (see below) — unless the user has instructed
+   otherwise for that PR/task, or extenuating circumstances apply (e.g.
+   risky/irreversible changes, doubts about correctness, unresolved
+   discussion with the user). Use squash merge to match this repository's
+   history style.
 
 ## Release / CI notes
 
@@ -73,6 +75,17 @@ Before a PR may be merged (and before declaring PR work complete):
   auto-generated changelog, and attaches both artifacts. Tag push is
   deliberately the only release trigger (reacting to `release: published` as
   well would race two runs over the same asset).
+- Shipping a release is covered by the standing permission in the PR protocol
+  above: after the work is merged, agents may cut the release themselves.
+  Choose the version by semver against the shipped changes (breaking change →
+  major; new user-facing capability → minor; fixes only → patch), then
+  **monitor the run to completion and verify the published release** (both
+  assets present, notarization accepted, release published rather than left
+  as a draft).
+- Release builds require the full signing/notarization secret set: on a tag
+  push the workflow fails before building rather than publishing artifacts
+  Gatekeeper would reject. The ad-hoc fallbacks apply to manual test builds
+  only.
 - Tags must be `v<major>[.<minor>[.<patch>]]` (e.g. `v1.2.3`); the workflow
   rejects malformed versions.
 - Workflow shell steps run under the macOS system bash (**3.2**) — no

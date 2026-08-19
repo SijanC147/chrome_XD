@@ -90,9 +90,11 @@ Helper scripts used by the workflow live in
 Maintainers: signing/notarization requires these repository secrets —
 `MACOS_CERTIFICATE_P12` (base64 .p12), `MACOS_CERTIFICATE_PASSWORD`,
 `APPLE_TEAM_ID`, `NOTARY_API_KEY_P8`, `NOTARY_API_KEY_ID`,
-`NOTARY_API_ISSUER_ID`. If they're absent the workflow still succeeds with an
-ad-hoc–signed, non-notarized build (first launch then needs
-right-click → Open).
+`NOTARY_API_ISSUER_ID`. Releases require all six: a tag push fails before
+building rather than publishing artifacts Gatekeeper would reject. Manual test
+builds, by contrast, fall back to an ad-hoc–signed, non-notarized build when
+the secrets are absent (such a build needs right-click → Open on first
+launch).
 
 ## Installation
 
